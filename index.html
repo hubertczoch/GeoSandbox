@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Accessibility Map - Szpitale w Kamiennej Górze</title>
+    <title>Accessibility Map - Szpitale, Apteki, Szkoły</title>
 
     <!-- Styl Leaflet -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
@@ -57,17 +57,17 @@
 </head>
 <body>
 
-    <h1>Mapowanie obiektów medycznych z OSM - Kamienna Góra</h1>
+    <h1>Wyszukiwanie obiektów z OSM - Kliknij na mapie</h1>
 
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
     <script>
-        // 1. Współrzędne centrum Kamiennej Góry
+        // 1. Domyślne współrzędne (Kamienna Góra)
         const CENTER_LAT = 50.7833;
         const CENTER_LNG = 16.0333;
-        const SEARCH_RADIUS_METERS = 10000; // Promień wyszukiwania: 10 km
+        const SEARCH_RADIUS_METERS = 5000; // Promień wyszukiwania: 5 km po kliknięciu
 
         // 2. Inicjalizacja mapy
         const map = L.map('map').setView([CENTER_LAT, CENTER_LNG], 13);
@@ -77,92 +77,142 @@
             attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         }).addTo(map);
 
-        // 3. Dodanie ikony lub oznaczenia dla punktów pobranych z OSM
-        const hospitalGroup = L.layerGroup().addTo(map);
+        // 3. Grupy warstw (osobna na punkt kliknięcia, osobna na obiekty z OSM)
+        const clickGroup = L.layerGroup().addTo(map);
+        const osmObjectsGroup = L.layerGroup().addTo(map);
 
-        // Funkcja pobierająca dane z Overpass API
-        async function loadHospitalsFromOSM() {
+        // Mapowanie typów obiektów na polskie nazwy i kolory
+        const categoryConfig = {
+            hospital: { label: 'Szpital', color: '#d9534f' },
+            pharmacy: { label: 'Apteka', color: '#5cb85c' },
+            school:   { label: 'Szkoła', color: '#f0ad4e' },
+            unknown:  { label: 'Inny obiekt', color: '#0275d8' }
+        };
+
+        // 4. Obsługa zdarzenia kliknięcia w mapę
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lng = e.latlng.lng;
+
+            // Czyszczenie poprzednich znaczników
+            clickGroup.clearLayers();
+            osmObjectsGroup.clearLayers();
+
+            // Oznaczenie punktu kliknięcia
+            L.marker([lat, lng])
+                .bindPopup("<b>Punkt szukania</b><br>Szukam obiektów w promieniu 5 km...")
+                .addTo(clickGroup)
+                .openPopup();
+
+            // Pobranie danych z OSM wokół klikniętego punktu
+            loadDataFromOSM(lat, lng);
+        });
+
+        // 5. Funkcja pobierająca dane z Overpass API dla 3 klas (szpitale, apteki, szkoły)
+        async function loadDataFromOSM(lat, lng) {
             const statusEl = document.getElementById('status-loader');
-            
-            // Zapytanie Overpass QL: szukamy obiektów z kluczem amenity=hospital w okręgu 10 km
+            if (statusEl) statusEl.innerText = "Pobieranie danych z OSM...";
+
+            // Zapytanie łączone dla szpitale (hospital), apteki (pharmacy) i szkoły (school)
             const overpassQuery = `
                 [out:json][timeout:25];
                 (
-                  node["amenity"="hospital"](around:${SEARCH_RADIUS_METERS},${CENTER_LAT},${CENTER_LNG});
-                  way["amenity"="hospital"](around:${SEARCH_RADIUS_METERS},${CENTER_LAT},${CENTER_LNG});
-                  relation["amenity"="hospital"](around:${SEARCH_RADIUS_METERS},${CENTER_LAT},${CENTER_LNG});
+                  node["amenity"~"hospital|pharmacy|school"](around:${SEARCH_RADIUS_METERS},${lat},${lng});
+                  way["amenity"~"hospital|pharmacy|school"](around:${SEARCH_RADIUS_METERS},${lat},${lng});
                 );
                 out center;
             `;
 
-const url = 'https://overpass-api.de/api/interpreter?data=' + encodeURIComponent(overpassQuery);
-            try {
-                const response = await fetch(url);
-                const data = await response.json();
+            // Zapasowe serwery w przypadku awarii jednego z nich
+            const servers = [
+                'https://overpass.kumi.systems/api/interpreter',
+                'https://maps.mail.ru/osm/tools/overpass/api/interpreter',
+                'https://overpass-api.de/api/interpreter'
+            ];
+
+            let data = null;
+
+            for (const serverUrl of servers) {
+                try {
+                    const response = await fetch(`${serverUrl}?data=${encodeURIComponent(overpassQuery)}`);
+                    if (!response.ok) throw new Error(`Status: ${response.status}`);
+                    data = await response.json();
+                    break; // Pobrano pomyślnie – wyjście z pętli
+                } catch (error) {
+                    console.warn(`Serwer ${serverUrl} niedostępny, próba następnego...`);
+                }
+            }
+
+            if (!data || !data.elements) {
+                if (statusEl) statusEl.innerText = "Błąd pobierania danych.";
+                return;
+            }
+
+            let count = 0;
+
+            data.elements.forEach(element => {
+                // Odczyt współrzędnych (dla node: lat/lon, dla way: center.lat/center.lon)
+                const itemLat = element.lat || (element.center && element.center.lat);
+                const itemLng = element.lon || (element.center && element.center.lon);
+
+                if (!itemLat || !itemLng) return;
+
+                const tags = element.tags || {};
+                const amenityType = tags.amenity || 'unknown';
+                const config = categoryConfig[amenityType] || categoryConfig.unknown;
+
+                const name = tags.name || config.label;
+                const street = tags["addr:street"] ? `${tags["addr:street"]} ${tags["addr:housenumber"] || ''}` : "Brak dokładnego adresu";
+                const wheelchair = tags.wheelchair ? tags.wheelchair : "brak danych o dostępności";
+
+                // Tworzenie znacznika
+                const marker = L.marker([itemLat, itemLng]);
                 
-                let count = 0;
+                marker.bindPopup(`
+                    <div style="min-width: 180px;">
+                        <h3 style="margin: 0 0 5px 0; font-size: 14px; color: ${config.color};">${name}</h3>
+                        <p style="margin: 3px 0; font-size: 12px;"><b>Kategoria:</b> ${config.label}</p>
+                        <p style="margin: 3px 0; font-size: 12px;"><b>Adres:</b> ${street}</p>
+                        <p style="margin: 3px 0; font-size: 12px;"><b>Dostępność (wózek):</b> ${wheelchair}</p>
+                        <small style="color: #777; font-size: 10px;">OSM ID: ${element.id}</small>
+                    </div>
+                `);
 
-                data.elements.forEach(element => {
-                    // Pobranie współrzędnych (dla węzłów `lat/lon`, dla relacji/sposobów `center.lat/center.lon`)
-                    const lat = element.lat || (element.center && element.center.lat);
-                    const lng = element.lon || (element.center && element.center.lon);
+                osmObjectsGroup.addLayer(marker);
+                count++;
+            });
 
-                    if (!lat || !lng) return;
-
-                    const tags = element.tags || {};
-                    const name = tags.name || "Szpital / Placówka medyczna";
-                    const street = tags["addr:street"] ? `${tags["addr:street"]} ${tags["addr:housenumber"] || ''}` : "Brak dokładnego adresu";
-                    const wheelchair = tags.wheelchair ? tags.wheelchair : "brak danych o dostępności";
-
-                    // Tworzenie znacznika na mapie
-                    const marker = L.marker([lat, lng]);
-                    
-                    marker.bindPopup(`
-                        <div style="min-width: 180px;">
-                            <h3 style="margin: 0 0 5px 0; font-size: 14px; color: #d9534f;">${name}</h3>
-                            <p style="margin: 3px 0; font-size: 12px;"><b>Adres:</b> ${street}</p>
-                            <p style="margin: 3px 0; font-size: 12px;"><b>Wózek inwalidzki:</b> ${wheelchair}</p>
-                            <small style="color: #777; font-size: 10px;">OSM ID: ${element.id}</small>
-                        </div>
-                    `);
-
-                    hospitalGroup.addLayer(marker);
-                    count++;
-                });
-
-                if (statusEl) {
-                    statusEl.innerText = `Znaleziono obiektów: ${count}`;
-                }
-
-            } catch (error) {
-                console.error("Błąd podczas pobierania danych z OSM:", error);
-                if (statusEl) {
-                    statusEl.innerText = "Błąd pobierania danych z OSM";
-                }
+            if (statusEl) {
+                statusEl.innerText = `Znaleziono obiektów: ${count}`;
             }
         }
 
-        // 4. Panel Legendy
+        // 6. Panel Legendy
         const legend = L.control({ position: 'bottomright' });
 
         legend.onAdd = function (map) {
             const div = L.DomUtil.create('div', 'info legend');
             div.innerHTML = `
-                <h4>Szpitale z OSM</h4>
+                <h4>Legenda (Wyszukiwanie)</h4>
                 <div class="legend-item">
-                    <span class="legend-icon" style="background: #2A81CB;"></span>
-                    <span>Szpital / Obiekt medyczny</span>
+                    <span class="legend-icon" style="background: #d9534f;"></span>
+                    <span>Szpitale</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-icon" style="background: #5cb85c;"></span>
+                    <span>Apteki</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-icon" style="background: #f0ad4e;"></span>
+                    <span>Szkoły</span>
                 </div>
                 <hr style="margin: 8px 0; border: 0; border-top: 1px solid #ccc;">
-                <div id="status-loader">Pobieranie danych z OSM...</div>
+                <div id="status-loader">Kliknij na mapie, aby szukać</div>
             `;
             return div;
         };
 
         legend.addTo(map);
-
-        // Wywołanie pobierania po załadowaniu mapy
-        loadHospitalsFromOSM();
     </script>
 </body>
 </html>
