@@ -26,6 +26,7 @@
             font-size: 13px;
             line-height: 1.6;
             color: #333;
+            pointer-events: auto;
         }
 
         .info.legend h4 {
@@ -53,11 +54,116 @@
             font-style: italic;
             color: #666;
         }
+
+        .controls {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+
+        .controls label {
+            font-weight: 600;
+        }
+
+        .controls input {
+            padding: 6px 8px;
+            width: 120px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .controls button {
+            padding: 6px 10px;
+            border: none;
+            border-radius: 4px;
+            background: #2c7be5;
+            color: white;
+            cursor: pointer;
+        }
+
+        .controls button:hover {
+            background: #1f5fb8;
+        }
+
+        .legend-search {
+            margin-top: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .legend-search input {
+            padding: 6px 8px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
+        .legend-search button {
+            padding: 6px 8px;
+            border: none;
+            border-radius: 4px;
+            background: #2c7be5;
+            color: white;
+            cursor: pointer;
+        }
+
+        .legend-search button:hover {
+            background: #1f5fb8;
+        }
+
+        .legend-items {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .legend-chip {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 6px;
+            border-radius: 999px;
+            font-size: 12px;
+            font-weight: 600;
+            color: #222;
+            background: #f7f7f7;
+        }
+
+        .legend-chip .legend-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            flex-shrink: 0;
+        }
+
+        .legend-chip button {
+            margin-left: auto;
+            border: none;
+            background: transparent;
+            color: #666;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 0 2px;
+        }
+
+        .legend-chip button:hover {
+            color: #000;
+        }
     </style>
 </head>
 <body>
 
     <h1>Wyszukiwanie obiektów z OSM - Kliknij na mapie</h1>
+
+    <div class="controls">
+        <label for="radius-input">Promień wyszukiwania (m):</label>
+        <input id="radius-input" type="number" min="100" max="50000" step="100" value="5000">
+        <button id="apply-radius-btn" type="button">Zastosuj</button>
+    </div>
 
     <div id="map"></div>
 
@@ -67,7 +173,9 @@
         // 1. Domyślne współrzędne (Kamienna Góra)
         const CENTER_LAT = 50.7833;
         const CENTER_LNG = 16.0333;
-        const SEARCH_RADIUS_METERS = 5000; // Promień wyszukiwania: 5 km po kliknięciu
+        let searchRadiusMeters = 5000; // Promień wyszukiwania ustawiany przez użytkownika
+        let requestedAmenityType = '';
+        const legendItems = [];
 
         // 2. Inicjalizacja mapy
         const map = L.map('map').setView([CENTER_LAT, CENTER_LNG], 13);
@@ -89,8 +197,58 @@
             unknown:  { label: 'Inny obiekt', color: '#0275d8' }
         };
 
+        const radiusInput = document.getElementById('radius-input');
+        const applyRadiusButton = document.getElementById('apply-radius-btn');
+
+        function updateSearchRadius() {
+            const parsedValue = Number.parseInt(radiusInput.value, 10);
+            if (!Number.isNaN(parsedValue) && parsedValue > 0) {
+                searchRadiusMeters = Math.min(50000, Math.max(100, parsedValue));
+                radiusInput.value = searchRadiusMeters;
+            } else {
+                radiusInput.value = searchRadiusMeters;
+            }
+        }
+
+        function normalizeAmenityType(value) {
+            const normalized = (value || '').trim().toLowerCase();
+            const mapping = {
+                hospital: 'hospital',
+                szpital: 'hospital',
+                pharmacy: 'pharmacy',
+                apteka: 'pharmacy',
+                school: 'school',
+                szkola: 'school',
+                szkoła: 'school'
+            };
+            return mapping[normalized] || normalized;
+        }
+
+        function getAmenityFilters() {
+            const rawValue = requestedAmenityType || '';
+            if (!rawValue.trim()) {
+                return ['hospital', 'pharmacy', 'school'];
+            }
+
+            const values = rawValue
+                .split(',')
+                .map(item => normalizeAmenityType(item))
+                .map(item => item.trim())
+                .filter(Boolean);
+
+            return values.length ? values : ['hospital', 'pharmacy', 'school'];
+        }
+
+        applyRadiusButton.addEventListener('click', updateSearchRadius);
+        radiusInput.addEventListener('change', updateSearchRadius);
+
         // 4. Obsługa zdarzenia kliknięcia w mapę
         map.on('click', function(e) {
+            const target = e.originalEvent && e.originalEvent.target;
+            if (target && target.closest && target.closest('.info.legend')) {
+                return;
+            }
+
             const lat = e.latlng.lat;
             const lng = e.latlng.lng;
 
@@ -100,7 +258,7 @@
 
             // Oznaczenie punktu kliknięcia
             L.marker([lat, lng])
-                .bindPopup("<b>Punkt szukania</b><br>Szukam obiektów w promieniu 5 km...")
+                .bindPopup(`<b>Punkt szukania</b><br>Szukam obiektów w promieniu ${searchRadiusMeters} m...`)
                 .addTo(clickGroup)
                 .openPopup();
 
@@ -113,12 +271,15 @@
             const statusEl = document.getElementById('status-loader');
             if (statusEl) statusEl.innerText = "Pobieranie danych z OSM...";
 
-            // Zapytanie łączone dla szpitale (hospital), apteki (pharmacy) i szkoły (school)
+            const amenityFilters = getAmenityFilters();
+            const amenityPattern = amenityFilters.join('|');
+
+            // Zapytanie łączone dla wybranych typów obiektów
             const overpassQuery = `
                 [out:json][timeout:25];
                 (
-                  node["amenity"~"hospital|pharmacy|school"](around:${SEARCH_RADIUS_METERS},${lat},${lng});
-                  way["amenity"~"hospital|pharmacy|school"](around:${SEARCH_RADIUS_METERS},${lat},${lng});
+                  node["amenity"~"${amenityPattern}"](around:${searchRadiusMeters},${lat},${lng});
+                  way["amenity"~"${amenityPattern}"](around:${searchRadiusMeters},${lat},${lng});
                 );
                 out center;
             `;
@@ -194,25 +355,114 @@
             const div = L.DomUtil.create('div', 'info legend');
             div.innerHTML = `
                 <h4>Legenda (Wyszukiwanie)</h4>
-                <div class="legend-item">
-                    <span class="legend-icon" style="background: #d9534f;"></span>
-                    <span>Szpitale</span>
-                </div>
-                <div class="legend-item">
-                    <span class="legend-icon" style="background: #5cb85c;"></span>
-                    <span>Apteki</span>
-                </div>
-                <div class="legend-item">
-                    <span class="legend-icon" style="background: #f0ad4e;"></span>
-                    <span>Szkoły</span>
-                </div>
+                <div style="margin-bottom: 8px; font-size: 12px; color: #666;">Wpisz typ obiektu, który chcesz wyszukać.</div>
                 <hr style="margin: 8px 0; border: 0; border-top: 1px solid #ccc;">
+                <div class="legend-search">
+                    <label for="object-type-input">Typ obiektu</label>
+                    <input id="object-type-input" type="text" placeholder="np. hospital, school">
+                    <button id="apply-object-type-btn" type="button">Zastosuj</button>
+                </div>
+                <div id="legend-items" class="legend-items"></div>
                 <div id="status-loader">Kliknij na mapie, aby szukać</div>
             `;
+            L.DomEvent.disableClickPropagation(div);
+            L.DomEvent.disableScrollPropagation(div);
+            L.DomEvent.addListener(div, 'click', L.DomEvent.stopPropagation);
+            L.DomEvent.addListener(div, 'mousedown', L.DomEvent.stopPropagation);
+            L.DomEvent.addListener(div, 'touchstart', L.DomEvent.stopPropagation);
+            L.DomEvent.addListener(div, 'pointerdown', L.DomEvent.stopPropagation);
+
             return div;
         };
 
         legend.addTo(map);
+
+        const objectTypeInput = document.getElementById('object-type-input');
+        const applyObjectTypeButton = document.getElementById('apply-object-type-btn');
+
+        function randomLegendStyle() {
+            const hue = Math.floor(Math.random() * 360);
+            const saturation = 70 + Math.floor(Math.random() * 20);
+            const lightness = 45 + Math.floor(Math.random() * 15);
+            return {
+                color: `hsl(${hue} ${saturation}% ${lightness}%)`,
+                background: `hsl(${hue} 60% 95%)`
+            };
+        }
+
+        function renderLegendItems() {
+            const container = document.getElementById('legend-items');
+            if (!container) return;
+
+            container.innerHTML = '';
+            legendItems.forEach(item => {
+                const chip = document.createElement('div');
+                chip.className = 'legend-chip';
+                chip.style.background = item.background;
+                chip.innerHTML = `<span class="legend-dot" style="background:${item.color};"></span><span>${item.label}</span>`;
+
+                const removeButton = document.createElement('button');
+                removeButton.type = 'button';
+                removeButton.textContent = '×';
+                removeButton.setAttribute('aria-label', `Usuń ${item.label}`);
+                removeButton.addEventListener('click', function(e) {
+                    e.stopPropagation();
+                    const index = legendItems.findIndex(entry => entry.key === item.key);
+                    if (index !== -1) {
+                        legendItems.splice(index, 1);
+                        renderLegendItems();
+                    }
+                });
+
+                chip.appendChild(removeButton);
+                container.appendChild(chip);
+            });
+        }
+
+        function updateRequestedAmenityType() {
+            requestedAmenityType = objectTypeInput.value;
+            const normalizedValues = requestedAmenityType
+                .split(',')
+                .map(item => item.trim())
+                .filter(Boolean);
+
+            const uniqueValues = [...new Set(normalizedValues)];
+            uniqueValues.forEach(value => {
+                const normalized = normalizeAmenityType(value);
+                const existing = legendItems.find(item => item.key === normalized);
+                if (!existing) {
+                    const style = randomLegendStyle();
+                    legendItems.push({
+                        key: normalized,
+                        label: value,
+                        color: style.color,
+                        background: style.background
+                    });
+                }
+            });
+
+            renderLegendItems();
+
+            if (statusLoader) {
+                statusLoader.innerText = `Typ wyszukiwania: ${requestedAmenityType || 'wszystkie obiekty'}`;
+            }
+        }
+
+        const statusLoader = document.getElementById('status-loader');
+        applyObjectTypeButton.addEventListener('click', function(e) {
+            e.stopPropagation();
+            updateRequestedAmenityType();
+        });
+        objectTypeInput.addEventListener('change', updateRequestedAmenityType);
+        objectTypeInput.addEventListener('click', function(e) {
+            e.stopPropagation();
+        });
+        objectTypeInput.addEventListener('mousedown', function(e) {
+            e.stopPropagation();
+        });
+        objectTypeInput.addEventListener('touchstart', function(e) {
+            e.stopPropagation();
+        });
     </script>
 </body>
 </html>
